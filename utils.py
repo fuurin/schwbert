@@ -8,7 +8,6 @@ from pydub import AudioSegment as AS
 import matplotlib.pyplot as plt
 from pylab import rcParams
 
-
 class Timer():
     """
     with Timer():
@@ -33,6 +32,27 @@ class Timer():
     def __exit__(self, _1, _2, _3):
         end = time.time() - self.start
         print(self.fmt.format(end))
+
+class Sampler:
+    def __init__(self, base_dir, dataframe):
+        self.base_dir = base_dir
+        self.df = dataframe
+    
+    def ppr_by_path(self, path, with_row=True, verbose=True):
+        absolute_path = os.path.join(self.base_dir, path)
+        if verbose:
+            print(f"path: {path}")
+        if with_row:
+            row = self.df[self.df['path'] == path]
+            row = row.T.squeeze()
+            return Multitrack(absolute_path), row
+        return Multitrack(absolute_path)
+    
+    def ppr(self, index=0, with_row=True, verbose=True):
+        path = self.df.loc[index]['path']
+        if verbose:
+            print(f"id: {index}")
+        return self.ppr_by_path(path, with_row=with_row, verbose=verbose)
 
 
 def grid_plot(ppr, 

@@ -4,10 +4,14 @@ from typing import List, Union
 from pypianoroll import Track, Multitrack
 
 class Bundle:
-    def __init__(self, melody=None, chord=None, meta={}):
+    def __init__(self, melody=np.array([]), chord=np.array([]), meta={}):
         self.melody = melody
         self.chord = chord
         self.meta = meta
+    
+    def __repr__(self):
+        meta = "\n".join([f"{item[0]}: {item[1]}" for item in self.meta.items()])
+        return f"----- bundle info -----\nmelody shape: {self.melody.shape}\nchord shape: {self.chord.shape}\n{meta}"
     
     def get_dict(self):
         dic = {}
@@ -17,22 +21,28 @@ class Bundle:
         return dic
     
     def set_dict(self, dictionary):
-        self.melody = dictionary['melody']
-        self.chord = dictionary['chord']
-        self.meta = dictionary['meta']
+        self.melody = dictionary.get('melody', np.array([]))
+        self.chord = dictionary.get('chord', np.array([]))
+        self.meta = dictionary.get('meta', {})
         return self
     
     def get_melody_track(self, program=0):
         if self.melody is None:
             return None
         
-        nproll = np.zeros([len(self.melody), 128], dtype=self.melody.dtype)
-        
+        is_ids = self.meta.get('melody_is_ids', False)
         bottom, top = self.meta.get('melody_pitch_range', [0, 128])
         offset = self.meta.get('melody_offset', 0)
+        all_pitch_num = self.meta.get('melody_all_pitch_num', 128)
+        step_len = len(self.melody)
         
-        source = self.melody[:, bottom:top]
-        nproll[:, offset:offset+source.shape[1]] = source
+        if is_ids:
+            nproll = np.zeros([step_len, 128], dtype=bool)
+            nproll[np.arange(step_len), self.melody] = True
+            nproll[:, :bottom], nproll[:, top:offset+all_pitch_num] = False, False
+        else:
+            nproll = np.zeros([step_len, 128], dtype=self.melody.dtype)
+            nproll[:, offset:offset+top-bottom] = self.melody[:, bottom:top]
         
         return Track(nproll, program=program, name='melody')
 

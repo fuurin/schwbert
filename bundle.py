@@ -33,13 +33,13 @@ class Bundle:
         is_ids = self.meta.get('melody_is_ids', False)
         bottom, top = self.meta.get('melody_pitch_range', [0, 128])
         offset = self.meta.get('melody_offset', 0)
-        all_pitch_num = self.meta.get('melody_all_pitch_num', 128)
+        melody_vocab_size = self.meta.get('melody_vocab_size', 128)
         step_len = len(self.melody)
         
         if is_ids:
             nproll = np.zeros([step_len, 128], dtype=bool)
             nproll[np.arange(step_len), self.melody] = True
-            nproll[:, :bottom], nproll[:, top:offset+all_pitch_num] = False, False
+            nproll[:, :bottom], nproll[:, top:offset+melody_vocab_size] = False, False
         else:
             nproll = np.zeros([step_len, 128], dtype=self.melody.dtype)
             nproll[:, offset:offset+top-bottom] = self.melody[:, bottom:top]
@@ -47,16 +47,23 @@ class Bundle:
         return Track(nproll, program=program, name='melody')
 
     def get_chord_track(self, program=0):
-        if self.chord is None:
+        chord = self.chord
+        if chord is None:
             return None
         
-        nproll = np.zeros([len(self.chord), 128], dtype=self.chord.dtype)
-        
+        is_ids = self.meta.get('chord_is_ids', False)
         bottom, top = self.meta.get('chord_pitch_range', [0, 128])
         offset = self.meta.get('chord_offset', 0)
+        step_len = len(chord)
         
-        source = self.chord[:, bottom:top]
-        nproll[:, offset:offset+source.shape[1]] = source
+        if is_ids:
+            nproll = np.zeros([step_len, 128], dtype=bool)
+            for pitch in range(top - bottom):
+                nproll[:, offset+pitch] = chord % 2
+                chord = chord // 2
+        else:
+            nproll = np.zeros([step_len, 128], dtype=chord.dtype)
+            nproll[:, offset:offset+top-bottom] = chord[:, bottom:top]
         
         return Track(nproll, program=program, name='chord')
     

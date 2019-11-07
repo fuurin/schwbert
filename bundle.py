@@ -4,10 +4,13 @@ from typing import List, Union
 from pypianoroll import Track, Multitrack
 
 class Bundle:
-    def __init__(self, melody=np.array([]), chord=np.array([]), meta={}):
-        self.melody = melody
-        self.chord = chord
-        self.meta = meta
+    def __init__(self, bundle_dict=None, melody=np.array([]), chord=np.array([]), meta={}):
+        if bundle_dict is None:
+            self.melody = melody
+            self.chord = chord
+            self.meta = meta
+        else:
+            self.set_dict(bundle_dict)
     
     def __repr__(self):
         meta = "\n".join([f"{item[0]}: {item[1]}" for item in self.meta.items()])
@@ -38,8 +41,8 @@ class Bundle:
         
         if is_ids:
             nproll = np.zeros([step_len, 128], dtype=bool)
-            nproll[np.arange(step_len), self.melody] = True
-            nproll[:, :bottom], nproll[:, top:offset+melody_vocab_size] = False, False
+            nproll[np.arange(step_len), offset+self.melody] = True
+            nproll[:, :offset+bottom], nproll[:, offset+top:offset+melody_vocab_size] = False, False
         else:
             nproll = np.zeros([step_len, 128], dtype=self.melody.dtype)
             nproll[:, offset:offset+top-bottom] = self.melody[:, bottom:top]

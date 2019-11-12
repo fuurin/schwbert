@@ -3,10 +3,15 @@
 import os, json, datetime
 import torch
 from attrdict import AttrDict
+from model import ConditionalBertBody, MultiGPUWrapper
 
 def make_state_name(config, model, epoch_num):
+    if issubclass(model.__class__, MultiGPUWrapper):
+        model_name = model.module.__class__.__name__
+    else:
+        model_name = model.__class__.__name__
+    
     nickname = config.nickname
-    model_name = model.__class__.__name__
     E = epoch_num
     H = config.hidden_size
     I = config.intermediate_size
@@ -21,6 +26,9 @@ def make_state_name(config, model, epoch_num):
     return state_name
 
 def save_model(config, model, epoch_num, directory):
+    if issubclass(model.__class__, MultiGPUWrapper):
+        model = model.module
+    
     state_name = f"{make_state_name(config, model, epoch_num)}.pth"
     state_path = os.path.join(directory, state_name)
     torch.save(model.state_dict(), state_path)
@@ -52,8 +60,7 @@ def load_body(config, input_emb, condition_emb, directory):
     
     input_emb = load_model(input_emb, input_emb_name, directory)
     condition_emb = load_model(condition_emb, condition_emb_name, directory)
-    body = ConditionalBertBody(config, melody_emb, chord_emb, 
-                               config.melody_pad_id, config.chord_pad_id)
+    body = ConditionalBertBody(config, input_emb, condition_emb)
     body.conditional_bert_stack = load_model(body.conditional_bert_stack, 
                                              bert_stack_name, directory)
     
@@ -69,7 +76,6 @@ def save_config(config, directory, state_names_dict={}):
               open(file_path, "w"), 
               ensure_ascii=False, 
               indent=4, 
-              sort_keys=True, 
               separators=(',', ': '))
     print(f"{file_name} saved")
     return file_name

@@ -33,6 +33,14 @@ class Timer():
         end = time.time() - self.start
         print(self.fmt.format(end))
 
+def count_params(*modules, requires_grad=True):
+    param_nums = []
+    for module in modules:
+        for param in module.parameters():
+            if param.requires_grad and requires_grad:
+                param_nums.append(param.numel())
+    return sum(param_nums)
+        
 class Sampler:
     def __init__(self, base_dir, dataframe):
         self.base_dir = base_dir

@@ -5,12 +5,25 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.normalization import LayerNorm
 
+class FactorizedEmbedding(nn.Module):
+    def __init__(self, vocab_size, fact_size, hidden_size, **kwargs):
+        super(FactorizedEmbedding, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, fact_size, **kwargs)
+        self.out = nn.Linear(fact_size, hidden_size, bias=False)
+    
+    def forward(self, inputs):
+        output = self.embedding(inputs)
+        output = self.out(output)
+        return output
+
 class MusicEmbeddings(nn.Module):
-    def __init__(self, config, vocab_size, pad_id=0):
+    def __init__(self, config, vocab_size=None, pad_id=0):
         super(MusicEmbeddings, self).__init__()
         
         # EmbeddingLayer: (入力の種類数, 組込ベクトルサイズ)
         # 48とかのIDを受け取ってone-hot vectorと解釈して組込ベクトルへ変換する
+        self.pad_id = pad_id
+        self.fact_size = config.fact_size
         self.hidden_size = config.hidden_size
         self.beat_res = config.beat_resolution
         self.step_num = config.step_num
@@ -18,25 +31,30 @@ class MusicEmbeddings(nn.Module):
         self.bar_num = config.bar_num
         self.bar_step_num = config.beats_in_bar * self.beat_res
         
-        self.input_embeddings = nn.Embedding(
-            vocab_size,
-            self.hidden_size, # 24
-            padding_idx=pad_id
-        )
+        if vocab_size is not None:
+            self.input_embedding = FactorizedEmbedding(
+                vocab_size,       # 67 or 4097
+                self.fact_size,   # 12
+                self.hidden_size, # 24
+                padding_idx=pad_id
+            )
         
-        self.step_embeddings = nn.Embedding(
+        self.step_embedding = FactorizedEmbedding(
             self.step_num,   # 768
+            self.fact_size,  # 12
             self.hidden_size # 24
         )
         
-        self.beat_embeddings = nn.Embedding(
+        self.beat_embedding = FactorizedEmbedding(
             self.beat_num,   # 64
+            self.fact_size,  # 12
             self.hidden_size # 24
         )
         
-        self.bar_embeddings = nn.Embedding(
+        self.bar_embedding = FactorizedEmbedding(
             self.bar_num,    # 16
-            self.hidden_size # 24 ここはむしろEmbeddingのほうが大きくなってしまっている...
+            self.fact_size,  # 12
+            self.hidden_size # 24
         )
         
         self.norm = LayerNorm(config.hidden_size, eps=1e-8)
@@ -47,17 +65,17 @@ class MusicEmbeddings(nn.Module):
         step_ids = torch.arange(self.step_num, dtype=torch.float32) # 0~767
         step_ids = step_ids.unsqueeze(0).expand(input_emb.shape[:-1]) # バッチ用の次元を追加
         step_ids = step_ids.to(input_emb.device)
-        step_emb = self.step_embeddings(step_ids.type(torch.long))
+        step_emb = self.step_embedding(step_ids.type(torch.long))
         
         # beat ID -> 拍埋め込みベクトル
         # 同じ数がbeat_res個続くようにする
         beat_ids = torch.floor(step_ids.clone() / self.beat_res)
-        beat_emb = self.beat_embeddings(beat_ids.type(torch.long))
+        beat_emb = self.beat_embedding(beat_ids.type(torch.long))
         
         # bar ID -> 小節埋め込みベクトル
         # 同じ数がbar_step_num個続くようにする
         bar_ids = torch.floor(step_ids.clone() / self.bar_step_num)
-        bar_emb = self.bar_embeddings(bar_ids.type(torch.long))
+        bar_emb = self.bar_embedding(bar_ids.type(torch.long))
         
         # 4つの埋め込みベクトルを足し合わせる
         # (batch_size, step_num, hidden_size)
@@ -74,7 +92,7 @@ class MusicEmbeddings(nn.Module):
         # input_ids: (batch_size, step_num)の文章中の単語ID列
         
         # input ID -> 入力埋め込みベクトル
-        input_emb = self.input_embeddings(input_ids)
+        input_emb = self.input_embedding(input_ids)
         
         # ステップ，拍，小節の埋め込みベクトルを加算
         embeddings = self.add_fixed_embeddings(input_emb)
@@ -274,8 +292,13 @@ class ConditionalBertStack(nn.Module):
     def __init__(self, config):
         super(ConditionalBertStack, self).__init__()
         self.layer_num = config.attention_layer_num    
-        attention_list = [ConditionalBertLayer(config) for _ in range(self.layer_num)]
-        self.attention_list = nn.ModuleList(attention_list)
+        self.share_all_params = config.get("share_all_bert_params", False)
+        if self.share_all_params:
+            self.shared_attention = ConditionalBertLayer(config)
+            self.attention_list = range(self.layer_num)
+        else:
+            attention_list = [ConditionalBertLayer(config) for _ in range(self.layer_num)]
+            self.attention_list = nn.ModuleList(attention_list)
     
     def forward(self, input_tensor, condition_tensor, input_pad, condition_pad, 
                 get_all_outputs=False, get_probs=False):
@@ -283,6 +306,9 @@ class ConditionalBertStack(nn.Module):
         all_outputs, all_probs, all_c_probs = [], [], []
         
         for attention in self.attention_list:
+            if self.share_all_params:
+                attention = self.shared_attention
+                
             if get_probs:
                 input_tensor, probs, c_probs = attention(
                     input_tensor, condition_tensor, 
@@ -317,18 +343,22 @@ class ConditionalBertStack(nn.Module):
 
 
 class ConditionalBertBody(nn.Module):
-    def __init__(self, config, input_embeddings, condition_embeddings, input_pad_id, condition_pad_id):
+    def __init__(self, config, input_embeddings, condition_embeddings):
         super(ConditionalBertBody, self).__init__()
         self.config = config
-        self.input_pad_id = input_pad_id
-        self.condition_pad_id = condition_pad_id
+        self.input_pad_id = input_embeddings.pad_id
+        self.condition_pad_id = condition_embeddings.pad_id
         self.input_embeddings = input_embeddings
         self.condition_embeddings = condition_embeddings
         self.conditional_bert_stack = ConditionalBertStack(config)
     
-    def make_pad(self, ids, pad_id):
-        pad = (ids != pad_id).to(torch.float32)
-        pad = pad.to(ids.device)
+    def make_pad(self, input_tensor, pad_id):
+        if input_tensor.dim() == 2:
+            pad = (input_tensor != pad_id)
+        elif input_tensor.dim() == 3:
+            pad = (input_tensor[:, :, pad_id] == 1)
+        
+        pad = pad.to(torch.float32).to(input_tensor.device)
         return pad
     
     def forward(self, input_tensor, condition_tensor, get_all_outputs=False, get_probs=False):
@@ -341,3 +371,25 @@ class ConditionalBertBody(nn.Module):
                         input_pad, condition_pad,
                         get_all_outputs, get_probs)
         return stack_out
+
+
+
+
+class MultiGPUWrapper:
+    """
+    DataParallelでWrapしてもmoduleのアトリビュートにアクセスできるWrapper
+    DataParallelへのアトリビュートアクセスが優先され，なければmoduleのものにアクセスする
+    dirなど中身を見たいときにはthis.moduleもしくはthis.data_parallelを用いる
+    """
+    def __init__(self, module, device_ids=None, output_device=None, dim=0):
+        self.module = module
+        self.data_parallel = nn.DataParallel(self.module, device_ids, output_device, dim)
+        
+    def __getattr__(self, attr):
+        if hasattr(self.data_parallel, attr):
+            return getattr(self.data_parallel, attr)
+        else:
+            return getattr(self.module, attr)
+    
+    def __call__(self, *args, **kwargs):
+        return self.data_parallel(*args, **kwargs)

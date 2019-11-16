@@ -146,7 +146,13 @@ class PypianorollBundler:
                 meta['path'] = row.path
                 meta['bpm'] = row.bpm
                 meta['original_key'] = row.estimated_key_signature
-
-            bundles.append(Bundle(bundle_melody, bundle_chord, meta))
+            
+            bundle_dict = {
+                'melody': bundle_melody,
+                'chord': bundle_chord,
+                'meta': meta,
+            }
+            
+            bundles.append(Bundle(bundle_dict))
 
         return bundles

@@ -130,48 +130,55 @@ class Transpose(BundlesProcessor):
 
 
 class TrimMelodyInRange(BundlesProcessor):
-    def __init__(self, bottom, top, keep_size=False):
-        if bottom < 0 or top > 127:
-            raise ValueError("Pitch range must be in [0, 127].")
-        if top - bottom < 12:
-            raise ValueError("Pitch range must be larger than 12 pitches.")
-        self.bottom, self.top = bottom, top
+    def __init__(self, octave_size, keep_size=False):
+        assert(octave_size > 0)
+        self.octave_size = octave_size
         self.keep_size = keep_size
-    
-    def get_active_range(self, nproll):
-        pitches = np.where(nproll)[1]
-        return np.min(pitches), np.max(pitches)
     
     def process_bundle(self, bundle):
         nproll = bundle.melody
         
-        bottom, top = self.bottom, self.top
+        oct_size = self.octave_size
         
-        lowest, highest = self.get_active_range(nproll)
+        # get_pitch_range
+        steps, pitches = np.where(nproll)
+        lowest, highest = np.min(pitches), np.max(pitches)
         
-        bottom_saturation = bottom - lowest
-        top_saturation = highest - top
+        # 最も範囲内の音符が多くなるオクターブを見つける
+        lowest_oct, highest_oct = lowest // 12, highest // 12
+        opt_oct, opt_score = lowest_oct, 0
+        for lower_oct in range(lowest_oct, highest_oct + 1 - oct_size + 1):
+            oct_score = np.sum((lower_oct * 12 <= pitches) & (pitches < (lower_oct + oct_size) * 12))
+            if oct_score > opt_score:
+                opt_oct, opt_score = lower_oct, oct_score
+        
+        opt_low, opt_high = opt_oct * 12, (opt_oct + oct_size) * 12
+        
+        # それでも範囲外に出てしまう音符を近い方のオクターブに収める
+        bottom_saturation = opt_low - lowest
+        top_saturation = highest - opt_high + 1
         
         if bottom_saturation > 0:
-            shift_octave = - (bottom_saturation // 12 + 1)
-        elif top_saturation > 0:
-            shift_octave = top_saturation // 12 + 1
-        else:
-            shift_octave = 0
-        
-        shift_amount = shift_octave * 12
-        shifted_bottom, shifted_top = bottom + shift_amount, top + shift_amount
+            is_saturated = pitches < opt_low
+            saturated_steps, saturated_pitches = steps[is_saturated], pitches[is_saturated]
+            saturated_new_pitches = saturated_pitches % 12 + opt_low
+            nproll[saturated_steps, saturated_new_pitches] = nproll[saturated_steps, saturated_pitches]
+            nproll[saturated_steps, saturated_pitches] = 0
+            
+        if top_saturation > 0:
+            is_saturated = pitches >= opt_high
+            saturated_steps, saturated_pitches = steps[is_saturated], pitches[is_saturated]
+            saturated_new_pitches = saturated_pitches % 12 + (opt_high - 12)
+            nproll[saturated_steps, saturated_new_pitches] = nproll[saturated_steps, saturated_pitches]
+            nproll[saturated_steps, saturated_pitches] = 0
         
         if self.keep_size:
-            nproll[:, bottom:top+1] = nproll[:, shifted_bottom:shifted_top+1]
-            nproll[:, :bottom] = 0
-            nproll[:, top+1:] = 0
             bundle.meta['melody_offset'] = 0
             bundle.meta['melody_pitch_range'] = [0, nproll.shape[1]]
         else:
-            nproll = nproll[:, shifted_bottom:shifted_top+1]
-            bundle.meta['melody_offset'] = shifted_bottom
-            bundle.meta['melody_pitch_range'] = [0, top - bottom + 1]
+            nproll = nproll[:, opt_low:opt_high]
+            bundle.meta['melody_offset'] = opt_low
+            bundle.meta['melody_pitch_range'] = [0, oct_size * 12]
         
         bundle.melody = nproll
         
@@ -442,13 +449,13 @@ def preprocess_theorytab_original(row):
         Binarize(),
         DownBeatResolution(resolution_to=12),
         Transpose(),
-        TrimMelodyInRange(bottom=36, top=99),
-        AddSpecialPitchesToMelody(rest=64, mask=65, pad=66),
+        TrimMelodyInRange(octave_size=2),
+        AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
         TranslateChordIntoPitchClasses(),
         PermeateChord(),
         AddSpecialPitchesToChord(pad=12),
         Padding(),
-        MelodyPianorollToPitchID(default_id=64), # default to rest
+        MelodyPianorollToPitchID(default_id=24), # default to rest
         ChordVectorToChordID(pad=12),
         AddNoteAreasToMeta(include_rest=False),
     ])

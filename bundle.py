@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from attrdict import AttrDict
 from typing import List, Union
 from pypianoroll import Track, Multitrack
 
@@ -8,7 +9,7 @@ class Bundle:
         if bundle_dict is None:
             self.melody = melody
             self.chord = chord
-            self.meta = meta
+            self.meta = AttrDict(meta)
         else:
             self.set_dict(bundle_dict)
     
@@ -20,7 +21,7 @@ class Bundle:
         dic = {}
         dic['melody'] = self.melody
         dic['chord'] = self.chord
-        dic['meta'] = self.meta
+        dic['meta'] = AttrDict(self.meta)
         return dic
     
     def set_dict(self, dictionary):

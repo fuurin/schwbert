@@ -1,9 +1,12 @@
 # preparation/theorytab.pyで定義した各種モジュール
+# attention conditioningバージョン
 
 import math, random
 import torch
 import torch.nn as nn
 from torch.nn.modules.normalization import LayerNorm
+from attrdict import AttrDict
+from .save_and_load import save_model, load_model
 
 class FactorizedEmbedding(nn.Module):
     def __init__(self, vocab_size, fact_size, hidden_size, **kwargs):
@@ -371,25 +374,30 @@ class ConditionalBertBody(nn.Module):
                         input_pad, condition_pad,
                         get_all_outputs, get_probs)
         return stack_out
-
-
-
-
-class MultiGPUWrapper:
-    """
-    DataParallelでWrapしてもmoduleのアトリビュートにアクセスできるWrapper
-    DataParallelへのアトリビュートアクセスが優先され，なければmoduleのものにアクセスする
-    dirなど中身を見たいときにはthis.moduleもしくはthis.data_parallelを用いる
-    """
-    def __init__(self, module, device_ids=None, output_device=None, dim=0):
-        self.module = module
-        self.data_parallel = nn.DataParallel(self.module, device_ids, output_device, dim)
-        
-    def __getattr__(self, attr):
-        if hasattr(self.data_parallel, attr):
-            return getattr(self.data_parallel, attr)
-        else:
-            return getattr(self.module, attr)
     
-    def __call__(self, *args, **kwargs):
-        return self.data_parallel(*args, **kwargs)
+
+
+def save_body(config, body, epoch_num, directory):
+    input_emb_name = save_model(config, body.input_embeddings, epoch_num, output_dir)
+    condition_emb_name = save_model(config, body.condition_embeddings, epoch_num, output_dir)
+    bert_stack_name = save_model(config, body.conditional_bert_stack, epoch_num, output_dir)
+    return AttrDict({
+        "input_embeddings": input_emb_name, 
+        "condition_embeddings": condition_emb_name, 
+        "conditional_bert_stack": bert_stack_name
+    })
+
+def load_body(config, input_emb, condition_emb, directory):
+    state_name_dict = config["state_names"]
+    
+    input_emb_name = state_name_dict['input_embeddings']
+    condition_emb_name = state_name_dict['condition_embeddings']
+    bert_stack_name = state_name_dict['conditional_bert_stack']
+    
+    input_emb = load_model(input_emb, input_emb_name, directory)
+    condition_emb = load_model(condition_emb, condition_emb_name, directory)
+    body = ConditionalBertBody(config, input_emb, condition_emb)
+    body.conditional_bert_stack = load_model(body.conditional_bert_stack, 
+                                             bert_stack_name, directory)
+    
+    return body

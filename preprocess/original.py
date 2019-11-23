@@ -493,7 +493,7 @@ def load_bundle_list(input_csv, input_dir, core_num=1):
 
     print("Preprocessing Finished!")
     print(f"load {len(bundle_list)} bundles")
-    print(f"{len(error_list)} error caused")
+    print(f"{len(error_list)} error(s) occured")
     
     if error_list:
         print("error files list")

@@ -20,7 +20,7 @@ def make_state_name(config, model, epoch_num):
     
     state_name = f"{nickname}:{model_name}:E={E}H={H}I={I}A={A}AH={AH}"
     
-    if issubclass(model.__class__, PreTrainingModel):
+    if hasattr(model, 'condition_str'):
         state_name += model.condition_str
     
     return state_name

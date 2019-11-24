@@ -1,5 +1,5 @@
 # preparation/theorytab.pyで定義した各種モジュール
-# attention conditioningバージョン
+# embedding conditioningバージョン
 
 import math, random
 import torch
@@ -19,13 +19,41 @@ class FactorizedEmbedding(nn.Module):
         output = self.out(output)
         return output
 
-class MusicEmbeddings(nn.Module):
-    def __init__(self, config, vocab_size=None, pad_id=0):
-        super(MusicEmbeddings, self).__init__()
+class VecSeqEmbedding(nn.Module):
+    def __init__(self, input_size, output_size, padding_idx=None):
+        super(VecSeqEmbedding, self).__init__()
+        self.eye = torch.eye(input_size, dtype=torch.float)
+        self.pad_id = padding_idx
         
-        # EmbeddingLayer: (入力の種類数, 組込ベクトルサイズ)
-        # 48とかのIDを受け取ってone-hot vectorと解釈して組込ベクトルへ変換する
-        self.pad_id = pad_id
+        self.embedding = nn.Linear(input_size, output_size, bias=False)
+    
+    def forward(self, input_seq, device=None):
+        if input_seq.dim() < 3:
+            # 入力シーケンスがID列ならマスクをかけてやる
+            # ベクトルの時はノイズになるので，ノイズ作成時にPADのところは0にしておくこと
+            pad = (input_seq == self.pad_id)
+            input_seq = self.eye[input_seq]
+            input_seq[pad] = 0
+        
+            if device is not None:
+                input_seq = input_seq.to(device)
+            else:
+                input_seq = input_seq.to(input_seq.device)
+        
+        embedded = self.embedding(input_seq)
+        
+        return embedded
+    
+class ConditionalEmbeddings(nn.Module):
+    def __init__(self, config, 
+                 input_vocab_size, condition_vocab_size, 
+                 input_pad_id, condition_pad_id, 
+                 weights=[0.45*5, 0.25*5, 0.1*5, 0.1*5, 0.1*5]):
+        super(ConditionalEmbeddings, self).__init__()
+        
+        self.input_pad_id = input_pad_id
+        self.condition_pad_id = condition_pad_id
+        
         self.fact_size = config.fact_size
         self.hidden_size = config.hidden_size
         self.beat_res = config.beat_resolution
@@ -34,36 +62,47 @@ class MusicEmbeddings(nn.Module):
         self.bar_num = config.bar_num
         self.bar_step_num = config.beats_in_bar * self.beat_res
         
-        if vocab_size is not None:
-            self.input_embedding = FactorizedEmbedding(
-                vocab_size,       # 67 or 4097
-                self.fact_size,   # 12
-                self.hidden_size, # 24
-                padding_idx=pad_id
-            )
+        assert(len(weights) == 5)
+        self.weights = weights
+        
+        self.input_embedding = VecSeqEmbedding(
+            input_vocab_size, # 27
+            self.hidden_size, # 24
+            padding_idx=input_pad_id
+        )
+        
+        self.condition_embedding = FactorizedEmbedding(
+            condition_vocab_size, # 4097
+            self.fact_size,       # 12
+            self.hidden_size,     # 24
+            padding_idx=condition_pad_id
+        )
         
         self.step_embedding = FactorizedEmbedding(
-            self.step_num,   # 768
-            self.fact_size,  # 12
-            self.hidden_size # 24
+            self.step_num,    # 768
+            self.fact_size,   # 12
+            self.hidden_size, # 24
+            padding_idx=-1
         )
         
         self.beat_embedding = FactorizedEmbedding(
-            self.beat_num,   # 64
-            self.fact_size,  # 12
-            self.hidden_size # 24
+            self.beat_num,    # 64
+            self.fact_size,   # 12
+            self.hidden_size, # 24
+            padding_idx=-1
         )
         
         self.bar_embedding = FactorizedEmbedding(
-            self.bar_num,    # 16
-            self.fact_size,  # 12
-            self.hidden_size # 24
+            self.bar_num,     # 16
+            self.fact_size,   # 12
+            self.hidden_size, # 24
+            padding_idx=-1
         )
         
         self.norm = LayerNorm(config.hidden_size, eps=1e-8)
         self.dropout = nn.Dropout(config.dropout_prob)
     
-    def add_fixed_embeddings(self, input_emb):
+    def add_fixed_embeddings(self, input_emb, condition_emb):
         # step ID -> ステップ埋め込みベクトル
         step_ids = torch.arange(self.step_num, dtype=torch.float32) # 0~767
         step_ids = step_ids.unsqueeze(0).expand(input_emb.shape[:-1]) # バッチ用の次元を追加
@@ -80,9 +119,15 @@ class MusicEmbeddings(nn.Module):
         bar_ids = torch.floor(step_ids.clone() / self.bar_step_num)
         bar_emb = self.bar_embedding(bar_ids.type(torch.long))
         
-        # 4つの埋め込みベクトルを足し合わせる
+        # 5つの埋め込みベクトルを足し合わせる
+        # 重みの設定も行える
         # (batch_size, step_num, hidden_size)
-        embeddings = input_emb + step_emb + beat_emb + bar_emb
+        weights = torch.Tensor(self.weights).to(torch.float).to(input_emb.device)
+        embeddings = weights[0] * input_emb + \
+                     weights[1] * condition_emb + \
+                     weights[2] * step_emb + \
+                     weights[3] * beat_emb + \
+                     weights[4] * bar_emb
         
         return embeddings
     
@@ -91,30 +136,24 @@ class MusicEmbeddings(nn.Module):
         tensor = self.dropout(tensor)
         return tensor
     
-    def forward(self, input_ids):
-        # input_ids: (batch_size, step_num)の文章中の単語ID列
+    def forward(self, input_ids, condition_ids):
         
-        # input ID -> 入力埋め込みベクトル
-        input_emb = self.input_embedding(input_ids)
+        # input ID -> 入力埋め込みベクトル: (batch_size, step_num)
+        input_emb = self.input_embedding(input_ids, device=condition_ids.device)
+        
+        # condition ID -> 条件埋め込みベクトル: (batch_size, step_num)
+        condition_emb = self.condition_embedding(condition_ids)
         
         # ステップ，拍，小節の埋め込みベクトルを加算
-        embeddings = self.add_fixed_embeddings(input_emb)
+        embeddings = self.add_fixed_embeddings(input_emb, condition_emb)
                 
         # 埋め込みベクトルを正規化 & Dropout
         embeddings = self.post_layers(embeddings)
         
+        # padの埋め込み表現は強制的に0にする
+        embeddings[condition_ids == self.condition_pad_id] *= 0
+        
         return embeddings
-
-
-class MelodyEmbeddings(MusicEmbeddings):
-    def __init__(self, config):
-        super(MelodyEmbeddings, self).__init__(config, config.melody_vocab_size, config.melody_pad_id)
-
-
-class ChordEmbeddings(MusicEmbeddings):
-    def __init__(self, config):
-        super(ChordEmbeddings, self).__init__(config, config.chord_vocab_size, config.chord_pad_id)
-
 
 
 
@@ -192,19 +231,6 @@ class BertSelfAttention(nn.Module):
             return context
 
 
-class BertSelfConditioning(nn.Module):
-    def __init__(self, config):
-        super(BertSelfConditioning, self).__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.norm = LayerNorm(config.hidden_size, eps=1e-8)
-        self.dropout = nn.Dropout(config.dropout_prob)
-    
-    def forward(self, hidden_states, condition_tensor):
-        conditioned_states = self.dense(hidden_states + condition_tensor)
-        conditioned_states = self.dropout(conditioned_states)
-        conditioned_states = self.norm(conditioned_states)
-        return conditioned_states
-
 
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
@@ -220,29 +246,21 @@ class BertSelfOutput(nn.Module):
         return hidden_states
 
 
-class ConditionalBertAttention(nn.Module):
+class BertAttention(nn.Module):
     def __init__(self, config):
-        super(ConditionalBertAttention, self).__init__()
-        self.condition_attn = BertSelfAttention(config)
-        self.conditioning = BertSelfConditioning(config)
+        super(BertAttention, self).__init__()
         self.attn = BertSelfAttention(config)
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, condition_tensor, input_pad, condition_pad, get_probs=False):
-        
+    def forward(self, input_tensor, input_pad, get_probs=False):
         if get_probs:
-            condition, condition_probs = self.condition_attn(condition_tensor, condition_pad, get_probs)
-            conditioned_tensor = self.conditioning(input_tensor, condition)
-            output, probs = self.attn(conditioned_tensor, input_pad, get_probs)
-            output = self.output(output, input_tensor) # or conditioned_tensor?
-            return output, probs, condition_probs
+            output, probs = self.attn(input_tensor, input_pad, get_probs)
+            output = self.output(output, input_tensor)
+            return output, probs
         else:
-            condition = self.condition_attn(condition_tensor, condition_pad, get_probs)
-            conditioned_tensor = self.conditioning(input_tensor, condition)
-            output = self.attn(conditioned_tensor, input_pad, get_probs)
+            output = self.attn(input_tensor, input_pad, get_probs)
             output = self.output(output, input_tensor) # or conditioned_tensor?
             return output
-
 
 
 
@@ -271,89 +289,81 @@ class BertOutput(BertSelfOutput):
 
 
 
-class ConditionalBertLayer(nn.Module):
+class BertLayer(nn.Module):
     def __init__(self, config):
-        super(ConditionalBertLayer, self).__init__()
-        self.attn = ConditionalBertAttention(config)
+        super(BertLayer, self).__init__()
+        self.attn = BertAttention(config)
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
     
-    def forward(self, input_tensor, condition_tensor, input_pad, condition_pad, get_probs=False):
+    def forward(self, input_tensor, input_pad, get_probs=False):
         if get_probs:
-            output, probs, c_probs = self.attn(input_tensor, condition_tensor, input_pad, condition_pad, get_probs)
+            output, probs = self.attn(input_tensor, input_pad, get_probs)
             intermediate_output = self.intermediate(output)
             output = self.output(intermediate_output, output)
-            return output, probs, c_probs
+            return output, probs
         else:
-            output = self.attn(input_tensor, condition_tensor, input_pad, condition_pad, get_probs)
+            output = self.attn(input_tensor, input_pad, get_probs)
             intermediate_output = self.intermediate(output)
             output = self.output(intermediate_output, output)
             return output
 
 
-class ConditionalBertStack(nn.Module):
+
+class BertStack(nn.Module):
     def __init__(self, config):
-        super(ConditionalBertStack, self).__init__()
+        super(BertStack, self).__init__()
         self.layer_num = config.attention_layer_num    
         self.share_all_params = config.get("share_all_bert_params", False)
         if self.share_all_params:
-            self.shared_attention = ConditionalBertLayer(config)
+            self.shared_attention = BertLayer(config)
             self.attention_list = range(self.layer_num)
         else:
-            attention_list = [ConditionalBertLayer(config) for _ in range(self.layer_num)]
+            attention_list = [BertLayer(config) for _ in range(self.layer_num)]
             self.attention_list = nn.ModuleList(attention_list)
     
-    def forward(self, input_tensor, condition_tensor, input_pad, condition_pad, 
+    def forward(self, input_tensor, input_pad, 
                 get_all_outputs=False, get_probs=False):
         
-        all_outputs, all_probs, all_c_probs = [], [], []
+        all_outputs, all_probs = [], []
         
         for attention in self.attention_list:
             if self.share_all_params:
                 attention = self.shared_attention
                 
             if get_probs:
-                input_tensor, probs, c_probs = attention(
-                    input_tensor, condition_tensor, 
-                    input_pad, condition_pad, 
-                    get_probs=get_probs)
+                input_tensor, probs = attention(
+                    input_tensor, input_pad, get_probs=get_probs)
             else:
                 input_tensor = attention(
-                    input_tensor, condition_tensor, 
-                    input_pad, condition_pad, 
-                    get_probs=get_probs)
+                    input_tensor, input_pad, get_probs=get_probs)
                 
             # 12段すべての出力を見る場合
             if get_all_outputs:
                 all_outputs.append(input_tensor)
                 if get_probs:
                     all_probs.append(probs)
-                    all_c_probs.append(c_probs)
                 
         # 最終段のAttentionのみ必要な場合
         if not get_all_outputs:
             all_outputs = input_tensor
             if get_probs:
                 all_probs = probs
-                all_c_probs = c_probs
         
         if get_probs:
-            return (all_outputs, all_probs, all_c_probs)
+            return (all_outputs, all_probs)
         else:
             return all_outputs
 
 
 
-
 class ConditionalBertBody(nn.Module):
-    def __init__(self, config, input_embeddings, condition_embeddings):
+    def __init__(self, config, embeddings):
         super(ConditionalBertBody, self).__init__()
         self.config = config
-        self.input_pad_id = input_embeddings.pad_id
-        self.condition_pad_id = condition_embeddings.pad_id
-        self.input_embeddings = input_embeddings
-        self.condition_embeddings = condition_embeddings
-        self.conditional_bert_stack = ConditionalBertStack(config)
+        self.input_pad_id = embeddings.input_pad_id
+        self.embeddings = embeddings
+        self.bert_stack = BertStack(config)
     
     def make_pad(self, input_tensor, pad_id):
         if input_tensor.dim() == 2:
@@ -365,39 +375,45 @@ class ConditionalBertBody(nn.Module):
         return pad
     
     def forward(self, input_tensor, condition_tensor, get_all_outputs=False, get_probs=False):
+        embeddings = self.embeddings(input_tensor, condition_tensor)
         input_pad = self.make_pad(input_tensor, self.input_pad_id)
-        condition_pad = self.make_pad(condition_tensor, self.condition_pad_id)
-        input_tensor = self.input_embeddings(input_tensor)
-        condition_tensor = self.condition_embeddings(condition_tensor)
-        stack_out = self.conditional_bert_stack(
-                        input_tensor, condition_tensor,
-                        input_pad, condition_pad,
-                        get_all_outputs, get_probs)
+        stack_out = self.bert_stack(embeddings, input_pad, get_all_outputs, get_probs)
         return stack_out
-    
+
+
+
+def make_body(config):
+    conditional_emb = ConditionalEmbeddings(config, 
+                     config.melody_vocab_size,
+                     config.chord_vocab_size,
+                     config.melody_pad_id,
+                     config.chord_pad_id)
+    body = ConditionalBertBody(config, conditional_emb)
+    return body
+
 
 
 def save_body(config, body, epoch_num, directory):
-    input_emb_name = save_model(config, body.input_embeddings, epoch_num, output_dir)
-    condition_emb_name = save_model(config, body.condition_embeddings, epoch_num, output_dir)
-    bert_stack_name = save_model(config, body.conditional_bert_stack, epoch_num, output_dir)
+    emb_name = save_model(config, body.embeddings, epoch_num, output_dir)
+    bert_stack_name = save_model(config, body.bert_stack, epoch_num, output_dir)
     return AttrDict({
-        "input_embeddings": input_emb_name, 
-        "condition_embeddings": condition_emb_name, 
-        "conditional_bert_stack": bert_stack_name
+        "embeddings": emb_name, 
+        "bert_stack": bert_stack_name
     })
 
-def load_body(config, input_emb, condition_emb, directory):
+def load_body(config, directory):
     state_name_dict = config["state_names"]
+    emb_name = state_name_dict['embeddings']
+    bert_stack_name = state_name_dict['bert_stack']
     
-    input_emb_name = state_name_dict['input_embeddings']
-    condition_emb_name = state_name_dict['condition_embeddings']
-    bert_stack_name = state_name_dict['conditional_bert_stack']
+    conditional_emb = ConditionalEmbeddings(config, 
+                     config.melody_vocab_size,
+                     config.chord_vocab_size,
+                     config.melody_pad_id,
+                     config.chord_pad_id)
+    conditional_emb = load_model(conditional_emb, emb_name, directory)
     
-    input_emb = load_model(input_emb, input_emb_name, directory)
-    condition_emb = load_model(condition_emb, condition_emb_name, directory)
-    body = ConditionalBertBody(config, input_emb, condition_emb)
-    body.conditional_bert_stack = load_model(body.conditional_bert_stack, 
-                                             bert_stack_name, directory)
+    body = ConditionalBertBody(config, conditional_emb)
+    body.bert_stack = load_model(body.bert_stack, bert_stack_name, directory)
     
     return body

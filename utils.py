@@ -1,4 +1,5 @@
 import os, glob, time, platform, numpy as np
+import torch
 import pretty_midi
 from pretty_midi import PrettyMIDI
 from pypianoroll import Multitrack, Track
@@ -33,6 +34,8 @@ class Timer():
         end = time.time() - self.start
         print(self.fmt.format(end))
 
+
+
 def count_params(*modules, requires_grad=True):
     param_nums = []
     for module in modules:
@@ -40,6 +43,26 @@ def count_params(*modules, requires_grad=True):
             if param.requires_grad and requires_grad:
                 param_nums.append(param.numel())
     return sum(param_nums)
+
+
+def grad_status(module, print_out=True):
+    names, avgs, stds = [], [], []
+    for (parameter, name) in zip(module.parameters(), module.state_dict().keys()):
+        names.append(name)
+        avg = parameter.grad.mean()
+        std = parameter.grad.std()
+        avgs.append(avg.item() if not torch.isnan(avg) else 0)
+        stds.append(std.item() if not torch.isnan(std) else 0)
+    
+    if print_out:
+        for (name, avg, std) in zip(names, avgs, stds):
+            print(f"avg: {avg:>.6f} | std: {std:>.6f} | name: {name:<70} ")
+        print(f"total average: {sum(avgs) / len(avgs):<.6f}")
+        print(f"std average: {sum(stds) / len(stds):<.6f}")
+    else:
+        return names, avgs, stds
+        
+        
         
 class Sampler:
     def __init__(self, base_dir, dataframe):

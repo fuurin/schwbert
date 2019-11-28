@@ -394,8 +394,8 @@ def make_body(config):
 
 
 def save_body(config, body, epoch_num, directory):
-    emb_name = save_model(config, body.embeddings, epoch_num, output_dir)
-    bert_stack_name = save_model(config, body.bert_stack, epoch_num, output_dir)
+    emb_name = save_model(config, body.embeddings, epoch_num, directory)
+    bert_stack_name = save_model(config, body.bert_stack, epoch_num, directory)
     return AttrDict({
         "embeddings": emb_name, 
         "bert_stack": bert_stack_name

@@ -38,6 +38,7 @@ def save_model(config, model, epoch_num, directory):
 def load_model(model, state_name, directory):
     file_path = os.path.join(directory, state_name)
     state_dict = torch.load(file_path)
+    
     model.load_state_dict(state_dict)
     return model
 

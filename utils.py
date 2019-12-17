@@ -1,5 +1,6 @@
 import os, glob, time, platform, numpy as np
 import torch
+from torchviz import make_dot
 import pretty_midi
 from pretty_midi import PrettyMIDI
 from pypianoroll import Multitrack, Track
@@ -20,8 +21,8 @@ class Timer():
         # このようにformatを指定することもできる
     
     """
-    def __init__(self, fmt='{:f}'):
-        self.fmt = fmt
+    def __init__(self, name="Timer"):
+        self.fmt = name + ': {:f}'
     
     def get_time():
         return time.time() - self.start
@@ -43,6 +44,10 @@ def count_params(*modules, requires_grad=True):
             if param.requires_grad and requires_grad:
                 param_nums.append(param.numel())
     return sum(param_nums)
+
+
+def show_model(model, output):
+    return make_dot(output, params=dict(model.named_parameters()))
 
 
 def grad_status(module, print_out=True):

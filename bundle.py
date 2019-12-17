@@ -34,19 +34,20 @@ class Bundle:
         if self.melody is None:
             return None
         
-        is_ids = self.meta.get('melody_is_ids', False)
         bottom, top = self.meta.get('melody_pitch_range', [0, 128])
         offset = self.meta.get('melody_offset', 0)
         melody_vocab_size = self.meta.get('melody_vocab_size', 128)
         step_len = len(self.melody)
         
-        if is_ids:
+        if self.melody.ndim == 1:
             nproll = np.zeros([step_len, 128], dtype=bool)
             nproll[np.arange(step_len), offset+self.melody] = True
             nproll[:, :offset+bottom], nproll[:, offset+top:offset+melody_vocab_size] = False, False
-        else:
+        elif self.melody.ndim == 2:
             nproll = np.zeros([step_len, 128], dtype=self.melody.dtype)
             nproll[:, offset:offset+top-bottom] = self.melody[:, bottom:top]
+        else:
+            raise ValueError("melody must be ndim==1 or ndim==2")
         
         return Track(nproll, program=program, name='melody')
 
@@ -55,19 +56,20 @@ class Bundle:
         if chord is None:
             return None
         
-        is_ids = self.meta.get('chord_is_ids', False)
         bottom, top = self.meta.get('chord_pitch_range', [0, 128])
         offset = self.meta.get('chord_offset', 0)
         step_len = len(chord)
         
-        if is_ids:
+        if chord.ndim == 1:
             nproll = np.zeros([step_len, 128], dtype=bool)
             for pitch in range(top - bottom):
                 nproll[:, offset+pitch] = chord % 2
                 chord = chord // 2
-        else:
+        elif chord.ndim == 2:
             nproll = np.zeros([step_len, 128], dtype=chord.dtype)
             nproll[:, offset:offset+top-bottom] = chord[:, bottom:top]
+        else:
+            raise ValueError("chord must be ndim==1 or ndim==2")
         
         return Track(nproll, program=program, name='chord')
     

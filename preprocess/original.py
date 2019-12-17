@@ -179,6 +179,8 @@ class TrimMelodyInRange(BundlesProcessor):
             nproll = nproll[:, opt_low:opt_high]
             bundle.meta['melody_offset'] = opt_low
             bundle.meta['melody_pitch_range'] = [0, oct_size * 12]
+            
+        bundle.meta['melody_vocab_size'] = bundle.meta['melody_pitch_range'][1]
         
         bundle.melody = nproll
         
@@ -206,6 +208,7 @@ class AddSpecialPitchesToMelody(BundlesProcessor):
         bundle.meta['melody_pitch_pad'] = self.pitch_pad
         bundle.meta['melody_pitch_mask'] = self.pitch_mask
         bundle.meta['melody_pitch_rest'] = self.pitch_rest
+        bundle.meta['melody_vocab_size'] = extended_melody.shape[1]
         
         bundle.melody = extended_melody
         return bundle
@@ -233,6 +236,7 @@ class TranslateChordIntoPitchClasses(BundlesProcessor):
         bundle.chord = chord_pcs
         bundle.meta['chord_offset'] = self.offset
         bundle.meta['chord_pitch_range'] = [0, 12]
+        bundle.meta['chord_vocab_size'] = chord_pcs.shape[1]
         
         return bundle
 
@@ -272,6 +276,8 @@ class AddSpecialPitchesToChord(BundlesProcessor):
         
         bundle.chord = extended_chord
         bundle.meta['chord_pitch_pad'] = self.pitch_pad
+        bundle.meta['chord_vocab_size'] = extended_chord.shape[1]
+        
         return bundle
 
 
@@ -398,6 +404,63 @@ class ChordVectorToChordID(BundlesProcessor):
         return bundle
 
 
+class MonophonizeMelody(BundlesProcessor):
+    """
+    メロディが和音になっているものがあることがわかったので直す
+    
+    Initialize Configs
+    ------
+    default_id: int = 0
+        ステップ内のどの音程も鳴っていない，または和音に鳴っているなどの事態の時設定されるID
+    mode: str = 'last'
+        IDに変換するうえで，1ステップに複数の音符があった場合の対処法
+        'default': default_idを設定
+        'highest'(default): ピッチの中で最も高い音符を設定
+        'lowest': ピッチの中で最も低い音符を設定
+    
+    Output Bundle
+    -------
+    melodyが単音化されたBundle
+    """
+    def __init__(self, default_id=0, mode='highest'):
+        self.default_id = default_id
+        assert(mode in ['default', 'highest', 'lowest'])
+        self.mode = mode
+    
+    def process_bundle(self, bundle):
+        poly_nums = (bundle.melody > 0).sum(axis=1)
+        poly_steps = np.where(poly_nums > 1)[0]
+        
+        if len(poly_steps) < 1:
+            return bundle
+        
+        eye = np.eye(bundle.melody.shape[1])
+        
+        if self.mode == 'default':
+            bundle.melody[poly_steps] = eye[self.default_id]
+        else:
+            poly_vecs = bundle.melody[poly_steps]
+            poly_vec_steps, poly_vec_pitches = np.where(poly_vecs)
+            
+            target_idxs = []
+            last_step = 0
+            for idx, step in enumerate(poly_vec_steps):
+                if last_step != step:
+                    if self.mode == 'highest':
+                        # highestはwhereのstepsの変化点の前の音程
+                        target_idxs.append(idx - 1)
+                    else:
+                        # lowestはwhereのstepsの変化点の後の音程
+                        target_idxs.append(idx)
+                last_step = step
+            
+            target_idxs.append(len(poly_vec_steps)-1)
+            monophonized_pitches = poly_vec_pitches[target_idxs]
+            bundle.melody[poly_steps] = eye[monophonized_pitches]
+        
+        return bundle
+
+
 class AddNoteAreasToMeta(BundlesProcessor):
     def __init__(self, include_rest=True):
         self.include_rest = include_rest
@@ -407,8 +470,13 @@ class AddNoteAreasToMeta(BundlesProcessor):
         last_pitch = None
         lowest, highest = bundle.meta['melody_pitch_range']
         rest_id = bundle.meta['melody_pitch_rest']
+        
+        if bundle.meta.get('melody_is_ids', False) == True:
+            melody = bundle.melody
+        else:
+            melody = np.where(bundle.melody)[1]
 
-        for step, pitch in enumerate(bundle.melody):
+        for step, pitch in enumerate(melody):
             if (lowest <= pitch < highest) or (self.include_rest and pitch == rest_id):
                 if last_pitch != pitch:
                     note_areas.append([])
@@ -449,14 +517,13 @@ def preprocess_theorytab_original(row):
         Binarize(),
         DownBeatResolution(resolution_to=12),
         Transpose(),
+        MonophonizeMelody(),
         TrimMelodyInRange(octave_size=2),
         AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
         TranslateChordIntoPitchClasses(),
         PermeateChord(),
         AddSpecialPitchesToChord(pad=12),
         Padding(),
-        MelodyPianorollToPitchID(default_id=24), # default to rest
-        ChordVectorToChordID(pad=12),
         AddNoteAreasToMeta(include_rest=False),
     ])
     return preprocess_theorytab(row, sequential_processor)

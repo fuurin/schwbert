@@ -54,21 +54,21 @@ class TheorytabDataLoader:
     def make_batch(self, melody_batch, chord_batch, meta_batch):
         # 一度np.arrayをかませてからLongTensorに渡すと爆速になったので採用
         # しかしバッチサイズが1000くらい大きくならないと同じ速度にならない
-        melody_batch, chord_batch = np.array([melody_batch, chord_batch])
+        melody_batch, chord_batch = np.array(melody_batch), np.array(chord_batch)
         
         if 'mnp' in meta_batch[0]:
             batch = {
-                'melody': torch.LongTensor(melody_batch),
-                'chord': torch.LongTensor(chord_batch),
+                'melody': torch.FloatTensor(melody_batch),
+                'chord': torch.FloatTensor(chord_batch),
                 'mnp_steps': torch.LongTensor(np.array([meta['mnp']['steps'] for meta in meta_batch])),
-                'mnp_weights': torch.LongTensor(np.array([meta['mnp']['weights'] for meta in meta_batch])),
-                'mnp_labels': torch.LongTensor(np.array([meta['mnp']['labels'] for meta in meta_batch])),
+                'mnp_weights': torch.ShortTensor(np.array([meta['mnp']['weights'] for meta in meta_batch])),
+                'mnp_labels': torch.ShortTensor(np.array([meta['mnp']['labels'] for meta in meta_batch])),
                 'meta': meta_batch # AttrDictを通すとlistではなくtupleになるので注意
             }
         else:
             batch = {
-                'melody': torch.LongTensor(melody_batch),
-                'chord': torch.LongTensor(chord_batch),
+                'melody': torch.FloatTensor(melody_batch),
+                'chord': torch.FloatTensor(chord_batch),
                 'meta': meta_batch # AttrDictを通すとlistではなくtupleになるので注意
             }
         return AttrDict(batch)
@@ -97,3 +97,66 @@ class TheorytabDataLoader:
         ジェネレータを返すわけではないので注意
         """
         return next(self.__iter__())
+
+
+class TheorytabDataLoader_list:
+    def __init__(self, theorytab_dataset, batch_size, shuffle=False):
+        self.dataset = theorytab_dataset
+        self.idx_list = list(range(len(self.dataset)))
+        assert(batch_size >= 1)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+    
+    def __len__(self):
+        return int(np.ceil(len(self.dataset) / self.batch_size))
+    
+    def make_batch(self, melody_batch, chord_batch, meta_batch):
+        # 一度np.arrayをかませてからLongTensorに渡すと爆速になったので採用
+        # しかしバッチサイズが1000くらい大きくならないと同じ速度にならない
+        melody_batch, chord_batch = np.array(melody_batch), np.array(chord_batch)
+        
+        if 'mnp' in meta_batch[0]:            
+            steps_batch = np.array([meta['mnp']['steps'] for meta in meta_batch])
+            weights_batch = np.array([meta['mnp']['weights'] for meta in meta_batch])
+            labels_batch = np.array([meta['mnp']['labels'] for meta in meta_batch])
+            
+            batch = {
+                'melody': torch.FloatTensor(melody_batch),
+                'chord': torch.FloatTensor(chord_batch),
+                'mnp_steps': torch.LongTensor(steps_batch),
+                'mnp_weights': torch.ShortTensor(weights_batch),
+                'mnp_labels': torch.ShortTensor(labels_batch),
+                'meta': meta_batch # AttrDictを通すとlistではなくtupleになるので注意
+            }
+        else:
+            batch = {
+                'melody': torch.FloatTensor(melody_batch),
+                'chord': torch.FloatTensor(chord_batch),
+                'meta': meta_batch # AttrDictを通すとlistではなくtupleになるので注意
+            }
+
+        return AttrDict(batch)
+            
+    def __call__(self):
+        if self.shuffle:
+            random.shuffle(self.idx_list)
+
+        batch_list = []
+        melody_batch, chord_batch, meta_batch = [], [], []
+        
+        for idx in self.idx_list:
+            melody, chord, meta = self.dataset[idx]
+            melody_batch.append(melody)
+            chord_batch.append(chord)
+            meta_batch.append(meta)
+
+            if len(melody_batch) >= self.batch_size:
+                batch = self.make_batch(melody_batch, chord_batch, meta_batch)
+                batch_list.append(batch)
+                melody_batch, chord_batch, meta_batch = [], [], []
+
+        if melody_batch and chord_batch and meta_batch:
+            batch = self.make_batch(melody_batch, chord_batch, meta_batch)
+            batch_list.append(batch)
+        
+        return batch_list

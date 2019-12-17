@@ -4,7 +4,6 @@
 import math, random
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.modules.normalization import LayerNorm
 from attrdict import AttrDict
 from .save_and_load import save_model, load_model
@@ -23,20 +22,33 @@ class FactorizedEmbedding(nn.Module):
 class VecSeqEmbedding(nn.Module):
     def __init__(self, input_size, output_size, padding_idx=None):
         super(VecSeqEmbedding, self).__init__()
+        self.eye = torch.eye(input_size, dtype=torch.float)
         self.pad_id = padding_idx
+        
         self.embedding = nn.Linear(input_size, output_size, bias=False)
     
-    def forward(self, input_seq):
-        if self.pad_id is not None:
-            input_seq[:, :, self.pad_id] = 0
+    def forward(self, input_seq, device=None):
+        if input_seq.dim() < 3:
+            # 入力シーケンスがID列ならマスクをかけてやる
+            # ベクトルの時はノイズになるので，ノイズ作成時にPADのところは0にしておくこと
+            pad = (input_seq == self.pad_id)
+            input_seq = self.eye[input_seq]
+            input_seq[pad] = 0
+        
+            if device is not None:
+                input_seq = input_seq.to(device)
+            else:
+                input_seq = input_seq.to(input_seq.device)
+        
         embedded = self.embedding(input_seq)
+        
         return embedded
     
 class ConditionalEmbeddings(nn.Module):
     def __init__(self, config, 
                  input_vocab_size, condition_vocab_size, 
                  input_pad_id, condition_pad_id, 
-                 weights=[0.45,0.25,0.1,0.1,0.1]):
+                 weights=[0.45*5, 0.25*5, 0.1*5, 0.1*5, 0.1*5]):
         super(ConditionalEmbeddings, self).__init__()
         
         self.input_pad_id = input_pad_id
@@ -50,106 +62,103 @@ class ConditionalEmbeddings(nn.Module):
         self.bar_num = config.bar_num
         self.bar_step_num = config.beats_in_bar * self.beat_res
         
+        assert(len(weights) == 5)
+        self.weights = weights
+        
         self.input_embedding = VecSeqEmbedding(
-            input_vocab_size,  # 27
-            self.hidden_size,     # 24
-            padding_idx=None
+            input_vocab_size, # 27
+            self.hidden_size, # 24
+            padding_idx=input_pad_id
         )
         
-        self.condition_embedding = VecSeqEmbedding(
-            condition_vocab_size, # 13
+        self.condition_embedding = FactorizedEmbedding(
+            condition_vocab_size, # 4097
+            self.fact_size,       # 12
             self.hidden_size,     # 24
-            padding_idx=None
+            padding_idx=condition_pad_id
         )
         
         self.step_embedding = FactorizedEmbedding(
             self.step_num,    # 768
-            self.fact_size,     # 12
+            self.fact_size,   # 12
             self.hidden_size, # 24
-            padding_idx=None
+            padding_idx=-1
         )
         
         self.beat_embedding = FactorizedEmbedding(
             self.beat_num,    # 64
-            self.fact_size,     # 12
+            self.fact_size,   # 12
             self.hidden_size, # 24
-            padding_idx=None
+            padding_idx=-1
         )
         
         self.bar_embedding = FactorizedEmbedding(
-            self.bar_num,       # 16
-            self.fact_size,      # 12
+            self.bar_num,     # 16
+            self.fact_size,   # 12
             self.hidden_size, # 24
-            padding_idx=None
+            padding_idx=-1
         )
         
-        self.post = nn.Sequential(
-            LayerNorm(config.hidden_size, eps=1e-8),
-            nn.Dropout(config.dropout_prob, inplace=True)
-        )
-        
-        # 位置ID: 0~767
-        step_ids = torch.arange(self.step_num, dtype=torch.float32)
-        self.step_ids = step_ids.type(torch.long)
-        
-        # 拍ID: 同じIDがbeat_res個続くようにする
-        self.beat_ids = torch.floor(step_ids.clone() / self.beat_res).type(torch.long)
-        
-        # 小節ID: 同じIDがbar_res個続くようにする
-        self.bar_ids = torch.floor(step_ids.clone() / self.bar_step_num).type(torch.long)
-        
-        # 各埋め込みベクトルの重み
-        if weights is None:
-            self.weights = weights
-        else:
-            assert(len(weights) == 5)
-            self.weights = torch.FloatTensor(weights)
+        self.norm = LayerNorm(config.hidden_size, eps=1e-8)
+        self.dropout = nn.Dropout(config.dropout_prob)
     
     def add_fixed_embeddings(self, input_emb, condition_emb):
-        device = input_emb.device
+        # step ID -> ステップ埋め込みベクトル
+        step_ids = torch.arange(self.step_num, dtype=torch.float32) # 0~767
+        step_ids = step_ids.unsqueeze(0).expand(input_emb.shape[:-1]) # バッチ用の次元を追加
+        step_ids = step_ids.to(input_emb.device)
+        step_emb = self.step_embedding(step_ids.type(torch.long))
         
-        # 位置ID -> 位置埋め込みベクトル
-        step_ids = self.step_ids.to(device)
-        step_emb = self.step_embedding(step_ids)
+        # beat ID -> 拍埋め込みベクトル
+        # 同じ数がbeat_res個続くようにする
+        beat_ids = torch.floor(step_ids.clone() / self.beat_res)
+        beat_emb = self.beat_embedding(beat_ids.type(torch.long))
         
-        # 拍ID -> 拍埋め込みベクトル
-        beat_ids = self.beat_ids.to(device)
-        beat_emb = self.beat_embedding(beat_ids)
+        # bar ID -> 小節埋め込みベクトル
+        # 同じ数がbar_step_num個続くようにする
+        bar_ids = torch.floor(step_ids.clone() / self.bar_step_num)
+        bar_emb = self.bar_embedding(bar_ids.type(torch.long))
         
-        # 小節ID -> 小節埋め込みベクトル
-        bar_ids = self.bar_ids.to(device)
-        bar_emb = self.bar_embedding(bar_ids)
-        
-        # 重みをかける
-        if self.weights is None:
-            embeddings = input_emb + condition_emb + step_emb + beat_emb + bar_emb
-        else:
-            weights = self.weights.to(device)
-            embeddings = weights[0] * input_emb + \
-                         weights[1] * condition_emb + \
-                         weights[2] * step_emb + \
-                         weights[3] * beat_emb + \
-                         weights[4] * bar_emb
+        # 5つの埋め込みベクトルを足し合わせる
+        # 重みの設定も行える
+        # (batch_size, step_num, hidden_size)
+        weights = torch.Tensor(self.weights).to(torch.float).to(input_emb.device)
+        embeddings = weights[0] * input_emb + \
+                     weights[1] * condition_emb + \
+                     weights[2] * step_emb + \
+                     weights[3] * beat_emb + \
+                     weights[4] * bar_emb
         
         return embeddings
     
-    def forward(self, input_vecs, condition_vecs):
+    def post_layers(self, tensor):
+        tensor = self.norm(tensor)
+        tensor = self.dropout(tensor)
+        return tensor
+    
+    def forward(self, input_ids, condition_ids):
         
-        # input ID -> 入力埋め込みベクトル: (batch_size, step_num, hidden_size)
-        input_emb = self.input_embedding(input_vecs)
+        # input ID -> 入力埋め込みベクトル: (batch_size, step_num)
+        input_emb = self.input_embedding(input_ids, device=condition_ids.device)
         
-        # condition ID -> 条件埋め込みベクトル: (batch_size, step_num, hidden_size)
-        condition_emb = self.condition_embedding(condition_vecs)
+        # condition ID -> 条件埋め込みベクトル: (batch_size, step_num)
+        condition_emb = self.condition_embedding(condition_ids)
         
         # ステップ，拍，小節の埋め込みベクトルを加算
         embeddings = self.add_fixed_embeddings(input_emb, condition_emb)
                 
-        return self.post(embeddings)
+        # 埋め込みベクトルを正規化 & Dropout
+        embeddings = self.post_layers(embeddings)
+        
+        # padの埋め込み表現は強制的に0にする
+        embeddings[condition_ids == self.condition_pad_id] *= 0
+        
+        return embeddings
 
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config, dropout=False):
+    def __init__(self, config):
         super(BertSelfAttention, self).__init__()
         
         self.hidden_size = config.hidden_size # 24
@@ -161,14 +170,8 @@ class BertSelfAttention(nn.Module):
         self.key = nn.Linear(self.hidden_size, self.hidden_size)
         self.value = nn.Linear(self.hidden_size, self.hidden_size)
         
-        self.softmax = nn.Softmax(dim=-1)
-        
-        # bottleneck
-        if dropout:
-            self.dropout = nn.Dropout(config.dropout_prob, inplace=True)
-        else:
-            self.dropout = None
-        
+        self.dropout = nn.Dropout(config.dropout_prob)
+    
     def separate_into_heads(self, single):
         # multi-head attention用にテンソルの形を変換
         # [batch, steps, hidden] -> [batch, head_num, steps, head_size]
@@ -176,13 +179,9 @@ class BertSelfAttention(nn.Module):
         multi = single.view(*multi_shape).permute(0, 2, 1, 3)
         return multi
     
-    def extend_pad(self, pad, paded_value=-1e9):
-        if self.attention_head_num > 1:
-            # multi-head attention用にpadの形を(batch, 1, 1, step_num)にする
-            extended_pad = pad.unsqueeze(1).unsqueeze(2) # multi-headに次元を対応
-        else:
-            # single attention用にpadの形を(batch, 1, step_num)にする
-            extended_pad = pad.unsqueeze(1)
+    def extend_pad(self, pad, paded_value=-10000.0):
+        # multi-head attention用にpadの形を(batch, 1, 1, step_num)にする
+        extended_pad = pad.unsqueeze(1).unsqueeze(2) # multi-headに次元を対応
         extended_pad = (1.0 - extended_pad) * paded_value
         extended_pad = extended_pad.to(dtype=torch.float32)
         return extended_pad
@@ -198,39 +197,36 @@ class BertSelfAttention(nn.Module):
     def forward(self, hidden_states, pad, get_probs=False):
         
         # 入力を全結合層で特徴量変換(分岐前)
-        query = self.query(hidden_states)
-        key = self.key(hidden_states)
-        value = self.value(hidden_states)
+        marged_query = self.query(hidden_states)
+        marged_key = self.key(hidden_states)
+        marged_value = self.value(hidden_states)
         
         # multi-head Attentionとして分岐
-        if self.attention_head_num > 1:
-            query = self.separate_into_heads(query)
-            key = self.separate_into_heads(key)
-            value = self.separate_into_heads(value)
+        queries = self.separate_into_heads(marged_query)
+        keyes = self.separate_into_heads(marged_key)
+        values = self.separate_into_heads(marged_value)
         
         # 特徴量同士の類似度を求める
-        score = torch.matmul(query, key.transpose(-1, -2))
-        score = score / math.sqrt(self.attention_head_size) # Scaled Dot-Product Attention
+        scores = torch.matmul(queries, keyes.transpose(-1, -2))
+        scores = scores / math.sqrt(self.attention_head_size) # Scaled Dot-Product Attention
         
         # マスクをかける
         # 足し算なのは，attention_padに0か-infが入っているため
         # -infはsoftmax正規化したときに0になる
-        score = score + self.extend_pad(pad)
+        scores = scores + self.extend_pad(pad)
         
         # AttentionMapの正規化とドロップアウト
-        prob = self.softmax(score)
-        if self.dropout is not None:
-            prob = self.dropout(prob)
+        probs = nn.Softmax(dim=-1)(scores)
+        probs = self.dropout(probs)
         
         # Attenton Mapをvalueに掛け算
-        context = torch.matmul(prob, value)
+        contexts = torch.matmul(probs, values)
         
         # multi-head Attentionの出力を結合
-        if self.attention_head_num > 1:
-            context = self.marge_heads(context)
+        context = self.marge_heads(contexts)
         
         if get_probs:
-            return context, prob
+            return context, probs
         else:
             return context
 
@@ -241,7 +237,7 @@ class BertSelfOutput(nn.Module):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.norm = LayerNorm(config.hidden_size, eps=1e-8)
-        self.dropout = nn.Dropout(config.dropout_prob, inplace=True)
+        self.dropout = nn.Dropout(config.dropout_prob)
     
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
@@ -263,28 +259,33 @@ class BertAttention(nn.Module):
             return output, probs
         else:
             output = self.attn(input_tensor, input_pad, get_probs)
-            output = self.output(output, input_tensor)
+            output = self.output(output, input_tensor) # or conditioned_tensor?
             return output
 
+
+
+def gelu(x):
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
 class BertIntermediate(nn.Module):
     def __init__(self, config):
         super(BertIntermediate, self).__init__()
-        self.intermediate = nn.Sequential(
-            nn.Linear(config.hidden_size, config.intermediate_size),
-            nn.LeakyReLU(0.2) # WGAN-gpの勾配を使うところで実装がされていないとのことなので代用
-        )
+        
+        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.intermediate_act_fn = gelu
     
     def forward(self, hidden_states):
-        return self.intermediate(hidden_states)
-
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
 
 
 class BertOutput(BertSelfOutput):
     def __init__(self, config):
         super(BertOutput, self).__init__(config)        
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+
 
 
 
@@ -325,24 +326,23 @@ class BertStack(nn.Module):
                 get_all_outputs=False, get_probs=False):
         
         all_outputs, all_probs = [], []
-        # Dの軽量版を作るとき，Attentionを使わない
-        if self.attention_list is not None:
-            for attention in self.attention_list:
-                if self.share_all_params:
-                    attention = self.shared_attention
-
+        
+        for attention in self.attention_list:
+            if self.share_all_params:
+                attention = self.shared_attention
+                
+            if get_probs:
+                input_tensor, probs = attention(
+                    input_tensor, input_pad, get_probs=get_probs)
+            else:
+                input_tensor = attention(
+                    input_tensor, input_pad, get_probs=get_probs)
+                
+            # 12段すべての出力を見る場合
+            if get_all_outputs:
+                all_outputs.append(input_tensor)
                 if get_probs:
-                    input_tensor, probs = attention(
-                        input_tensor, input_pad, get_probs=get_probs)
-                else:
-                    input_tensor = attention(
-                        input_tensor, input_pad, get_probs=get_probs)
-
-                # 12段すべての出力を見る場合
-                if get_all_outputs:
-                    all_outputs.append(input_tensor)
-                    if get_probs:
-                        all_probs.append(probs)
+                    all_probs.append(probs)
                 
         # 最終段のAttentionのみ必要な場合
         if not get_all_outputs:
@@ -361,20 +361,23 @@ class ConditionalBertBody(nn.Module):
     def __init__(self, config, embeddings):
         super(ConditionalBertBody, self).__init__()
         self.config = config
-        self.input_pad_id = config.melody_pad_id
-        self.condition_pad_id = config.chord_pad_id
+        self.input_pad_id = embeddings.input_pad_id
         self.embeddings = embeddings
         self.bert_stack = BertStack(config)
     
     def make_pad(self, input_tensor, pad_id):
-        pad = (input_tensor[:, :, pad_id] == 0)
+        if input_tensor.dim() == 2:
+            pad = (input_tensor != pad_id)
+        elif input_tensor.dim() == 3:
+            pad = (input_tensor[:, :, pad_id] == 0) # これ，逆だった
+        
         pad = pad.to(torch.float32).to(input_tensor.device)
         return pad
     
     def forward(self, input_tensor, condition_tensor, get_all_outputs=False, get_probs=False):
         embeddings = self.embeddings(input_tensor, condition_tensor)
-        pad = self.make_pad(condition_tensor, self.condition_pad_id)
-        stack_out = self.bert_stack(embeddings, pad, get_all_outputs, get_probs)
+        input_pad = self.make_pad(input_tensor, self.input_pad_id)
+        stack_out = self.bert_stack(embeddings, input_pad, get_all_outputs, get_probs)
         return stack_out
 
 

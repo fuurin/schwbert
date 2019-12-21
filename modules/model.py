@@ -9,17 +9,6 @@ from torch.nn.modules.normalization import LayerNorm
 from attrdict import AttrDict
 from .save_and_load import save_model, load_model
 
-class FactorizedEmbedding(nn.Module):
-    def __init__(self, vocab_size, fact_size, hidden_size, **kwargs):
-        super(FactorizedEmbedding, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, fact_size, **kwargs)
-        self.out = nn.Linear(fact_size, hidden_size, bias=False)
-    
-    def forward(self, inputs):
-        output = self.embedding(inputs)
-        output = self.out(output)
-        return output
-
 class VecSeqEmbedding(nn.Module):
     def __init__(self, input_size, output_size, padding_idx=None):
         super(VecSeqEmbedding, self).__init__()
@@ -33,150 +22,64 @@ class VecSeqEmbedding(nn.Module):
         return embedded
     
 class ConditionalEmbeddings(nn.Module):
-    def __init__(self, config, 
-                 input_vocab_size, condition_vocab_size, 
-                 input_pad_id, condition_pad_id, 
-                 weights=[0.45,0.25,0.1,0.1,0.1]):
+    def __init__(self, config, input_vocab_size, condition_vocab_size, input_pad_id=None):
         super(ConditionalEmbeddings, self).__init__()
         
-        self.input_pad_id = input_pad_id
-        self.condition_pad_id = condition_pad_id
-        
-        self.concat = config.get('concat', False)
-        self.fact_size = config.fact_size
+        self.pad_id = input_pad_id
+        self.emb_size = config.embedding_size
         self.hidden_size = config.hidden_size
         self.beat_res = config.beat_resolution
-        self.step_num = config.step_num
-        self.beat_num = config.beats_in_bar * config.bar_num
         self.bar_num = config.bar_num
-        self.bar_step_num = config.beats_in_bar * self.beat_res
+        self.beats_in_bar = config.beats_in_bar
+        self.bar_step_num = self.beats_in_bar * self.beat_res
+        self.step_num = self.bar_step_num * self.bar_num
         
-        self.input_embedding = VecSeqEmbedding(
-            input_vocab_size,  # 27
-            self.hidden_size,     # 24
-            padding_idx=None
-        )
+        # 各種埋め込み層
+        self.input_embedding = VecSeqEmbedding(input_vocab_size, self.emb_size)
+        self.condition_embedding = VecSeqEmbedding(condition_vocab_size, self.emb_size)
+        self.step_embedding = nn.Embedding(self.bar_step_num, self.emb_size)
+        self.beat_embedding = nn.Embedding(self.beats_in_bar, self.emb_size)
+        self.bar_embedding = nn.Embedding(self.bar_num, self.emb_size)
         
-        self.condition_embedding = VecSeqEmbedding(
-            condition_vocab_size, # 13
-            self.hidden_size,     # 24
-            padding_idx=None
-        )
-        
-        self.step_embedding = FactorizedEmbedding(
-            self.step_num,    # 768
-            self.fact_size,     # 12
-            self.hidden_size, # 24
-            padding_idx=None
-        )
-        
-        self.beat_embedding = FactorizedEmbedding(
-            self.beat_num,    # 64
-            self.fact_size,     # 12
-            self.hidden_size, # 24
-            padding_idx=None
-        )
-        
-        self.bar_embedding = FactorizedEmbedding(
-            self.bar_num,       # 16
-            self.fact_size,      # 12
-            self.hidden_size, # 24
-            padding_idx=None
-        )
-        
-        if self.concat:
-            self.concat_dense = nn.Linear(config.hidden_size*5, config.hidden_size)
-            
-        post_size = config.hidden_size * 5
+        # 後処理用の層
+        self.concat_dense = nn.Linear(self.emb_size*5, config.hidden_size)    
         self.post = nn.Sequential(
             LayerNorm(config.hidden_size, eps=1e-8),
             nn.Dropout(config.dropout_prob, inplace=True)
         )
         
-        # 位置ID: 0~767
-        step_ids = torch.arange(self.step_num, dtype=torch.float32)
-        self.step_ids = step_ids.type(torch.long)
+        # 位置関係のID列は固定
+        all_step_ids = torch.arange(self.step_num, dtype=torch.float32)
+        self.step_ids = (all_step_ids % self.bar_step_num).type(torch.long)
+        self.beat_ids = torch.floor((all_step_ids % self.bar_step_num) / self.beat_res).type(torch.long)
+        self.bar_ids = torch.floor(all_step_ids / self.bar_step_num).type(torch.long)
         
-        # 拍ID: 同じIDがbeat_res個続くようにする
-        self.beat_ids = torch.floor(step_ids.clone() / self.beat_res).type(torch.long)
-        
-        # 小節ID: 同じIDがbar_res個続くようにする
-        self.bar_ids = torch.floor(step_ids.clone() / self.bar_step_num).type(torch.long)
-        
-        # 各埋め込みベクトルの重み
-        if weights is None:
-            self.weights = weights
-        else:
-            assert(len(weights) == 5)
-            self.weights = torch.FloatTensor(weights)
-    
-    def add_fixed_embeddings(self, input_emb, condition_emb):
-        device = input_emb.device
-        
-        # 位置ID -> 位置埋め込みベクトル
-        step_ids = self.step_ids.to(device)
-        step_emb = self.step_embedding(step_ids)
-        
-        # 拍ID -> 拍埋め込みベクトル
-        beat_ids = self.beat_ids.to(device)
-        beat_emb = self.beat_embedding(beat_ids)
-        
-        # 小節ID -> 小節埋め込みベクトル
-        bar_ids = self.bar_ids.to(device)
-        bar_emb = self.bar_embedding(bar_ids)
-        
-        # 重みをかける
-        if self.weights is None:
-            embeddings = input_emb + condition_emb + step_emb + beat_emb + bar_emb
-        else:
-            weights = self.weights.to(device)
-            embeddings = weights[0] * input_emb + \
-                         weights[1] * condition_emb + \
-                         weights[2] * step_emb + \
-                         weights[3] * beat_emb + \
-                         weights[4] * bar_emb
-        
-        return embeddings
-    
     def concat_fixed_embeddings(self, input_emb, condition_emb):
         device = input_emb.device
         batch_size = len(input_emb)
+
+        # 埋め込みベクトルを作成
+        step_emb = self.step_embedding(self.step_ids.to(device)).repeat(batch_size, 1, 1)
+        beat_emb = self.beat_embedding(self.beat_ids.to(device)).repeat(batch_size, 1, 1)
+        bar_emb = self.bar_embedding(self.bar_ids.to(device)).repeat(batch_size, 1, 1)
         
-        # 位置ID -> 位置埋め込みベクトル
-        step_ids = self.step_ids.to(device)
-        step_emb = self.step_embedding(step_ids).repeat(batch_size, 1, 1)
-        
-        # 拍ID -> 拍埋め込みベクトル
-        beat_ids = self.beat_ids.to(device)
-        beat_emb = self.beat_embedding(beat_ids).repeat(batch_size, 1, 1)
-        
-        # 小節ID -> 小節埋め込みベクトル
-        bar_ids = self.bar_ids.to(device)
-        bar_emb = self.bar_embedding(bar_ids).repeat(batch_size, 1, 1)
-        
-        # 連結
+        # 連結 & サイズ合わせ
         embeddings = torch.cat((input_emb, condition_emb, step_emb, beat_emb, bar_emb),-1)
-        
-        # サイズ合わせ
         embeddings = self.concat_dense(embeddings)
         
         return embeddings
     
     def forward(self, input_vecs, condition_vecs):
-        
-        # input ID -> 入力埋め込みベクトル: (batch_size, step_num, hidden_size)
         input_emb = self.input_embedding(input_vecs)
-        
-        # condition ID -> 条件埋め込みベクトル: (batch_size, step_num, hidden_size)
         condition_emb = self.condition_embedding(condition_vecs)
+        embeddings = self.concat_fixed_embeddings(input_emb, condition_emb)
+        embeddings = self.post(embeddings)
         
-        # ステップ，拍，小節の埋め込みベクトルを加算
-        if self.concat:
-            embeddings = self.concat_fixed_embeddings(input_emb, condition_emb)
-        else:
-            embeddings = self.add_fixed_embeddings(input_emb, condition_emb)
-                
-        return self.post(embeddings)
+        if self.pad_id is not None:
+            is_not_pad = (input_vecs[:, :, self.pad_id] == 0).unsqueeze(-1)
+            embeddings = embeddings * is_not_pad
+            
+        return embeddings
 
 
 
@@ -425,8 +328,7 @@ def make_body(config):
     conditional_emb = ConditionalEmbeddings(config, 
                      config.melody_vocab_size,
                      config.chord_vocab_size,
-                     config.melody_pad_id,
-                     config.chord_pad_id)
+                     config.melody_pad_id)
     body = ConditionalBertBody(config, conditional_emb)
     return body
 
@@ -446,10 +348,8 @@ def load_body(config, directory):
     bert_stack_name = state_name_dict['bert_stack']
     
     conditional_emb = ConditionalEmbeddings(config, 
-                     config.melody_vocab_size,
-                     config.chord_vocab_size,
-                     config.melody_pad_id,
-                     config.chord_pad_id)
+                     config.melody_vocab_size, config.chord_vocab_size,
+                     config.melody_pad_id)
     conditional_emb = load_model(conditional_emb, emb_name, directory)
     
     body = ConditionalBertBody(config, conditional_emb)

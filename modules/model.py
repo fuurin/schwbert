@@ -42,6 +42,7 @@ class ConditionalEmbeddings(nn.Module):
         self.input_pad_id = input_pad_id
         self.condition_pad_id = condition_pad_id
         
+        self.concat = config.get('concat', False)
         self.fact_size = config.fact_size
         self.hidden_size = config.hidden_size
         self.beat_res = config.beat_resolution
@@ -83,6 +84,10 @@ class ConditionalEmbeddings(nn.Module):
             padding_idx=None
         )
         
+        if self.concat:
+            self.concat_dense = nn.Linear(config.hidden_size*5, config.hidden_size)
+            
+        post_size = config.hidden_size * 5
         self.post = nn.Sequential(
             LayerNorm(config.hidden_size, eps=1e-8),
             nn.Dropout(config.dropout_prob, inplace=True)
@@ -133,6 +138,30 @@ class ConditionalEmbeddings(nn.Module):
         
         return embeddings
     
+    def concat_fixed_embeddings(self, input_emb, condition_emb):
+        device = input_emb.device
+        batch_size = len(input_emb)
+        
+        # 位置ID -> 位置埋め込みベクトル
+        step_ids = self.step_ids.to(device)
+        step_emb = self.step_embedding(step_ids).repeat(batch_size, 1, 1)
+        
+        # 拍ID -> 拍埋め込みベクトル
+        beat_ids = self.beat_ids.to(device)
+        beat_emb = self.beat_embedding(beat_ids).repeat(batch_size, 1, 1)
+        
+        # 小節ID -> 小節埋め込みベクトル
+        bar_ids = self.bar_ids.to(device)
+        bar_emb = self.bar_embedding(bar_ids).repeat(batch_size, 1, 1)
+        
+        # 連結
+        embeddings = torch.cat((input_emb, condition_emb, step_emb, beat_emb, bar_emb),-1)
+        
+        # サイズ合わせ
+        embeddings = self.concat_dense(embeddings)
+        
+        return embeddings
+    
     def forward(self, input_vecs, condition_vecs):
         
         # input ID -> 入力埋め込みベクトル: (batch_size, step_num, hidden_size)
@@ -142,7 +171,10 @@ class ConditionalEmbeddings(nn.Module):
         condition_emb = self.condition_embedding(condition_vecs)
         
         # ステップ，拍，小節の埋め込みベクトルを加算
-        embeddings = self.add_fixed_embeddings(input_emb, condition_emb)
+        if self.concat:
+            embeddings = self.concat_fixed_embeddings(input_emb, condition_emb)
+        else:
+            embeddings = self.add_fixed_embeddings(input_emb, condition_emb)
                 
         return self.post(embeddings)
 
@@ -279,6 +311,16 @@ class BertIntermediate(nn.Module):
     def forward(self, hidden_states):
         return self.intermediate(hidden_states)
 
+    
+class BertIntermediate(nn.Module):
+    def __init__(self, config):
+        super(BertIntermediate, self).__init__()
+        self.intermediate = nn.Linear(config.hidden_size, config.intermediate_size)
+    
+    def forward(self, hidden_states):
+        hidden_states = self.intermediate(hidden_states)
+        # return F.gelu(hidden_states) # WGAN-gpの勾配を使うところで実装がされていないとのことなので代用
+        return F.leaky_relu(hidden_states, negative_slope=0.2, inplace=True)
 
 
 class BertOutput(BertSelfOutput):

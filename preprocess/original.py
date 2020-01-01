@@ -192,6 +192,7 @@ class AddSpecialPitchesToMelody(BundlesProcessor):
         self.pitch_pad  = pad
         self.pitch_mask = mask
         self.pitch_rest = rest
+        self.special_pitch_num = np.array([p is not None for p in [pad, mask, rest]]).sum()
     
     def set_rest_pitch(self, nproll, pitch):
         nproll[:, pitch] = nproll.any(axis=1) == False
@@ -201,9 +202,10 @@ class AddSpecialPitchesToMelody(BundlesProcessor):
         melody = bundle.melody
         step_len, pitch_len = melody.shape
         
-        extended_melody = np.zeros([step_len, pitch_len + 3], dtype=melody.dtype)
+        extended_melody = np.zeros([step_len, pitch_len + self.special_pitch_num], dtype=melody.dtype)
         extended_melody[:, :pitch_len] = melody
-        extended_melody = self.set_rest_pitch(extended_melody, pitch_len)
+        if self.pitch_rest is not None:
+            extended_melody = self.set_rest_pitch(extended_melody, pitch_len)
         
         bundle.meta['melody_pitch_pad'] = self.pitch_pad
         bundle.meta['melody_pitch_mask'] = self.pitch_mask
@@ -462,26 +464,23 @@ class MonophonizeMelody(BundlesProcessor):
 
 
 class AddNoteAreasToMeta(BundlesProcessor):
-    def __init__(self, include_rest=True):
-        self.include_rest = include_rest
-    
     def process_bundle(self, bundle):
         note_areas = []
-        last_pitch = None
+        last_pitch, last_step = None, None
         lowest, highest = bundle.meta['melody_pitch_range']
         rest_id = bundle.meta['melody_pitch_rest']
         
         if bundle.meta.get('melody_is_ids', False) == True:
             melody = bundle.melody
         else:
-            melody = np.where(bundle.melody)[1]
+            steps, pitches = np.where(bundle.melody)
 
-        for step, pitch in enumerate(melody):
-            if (lowest <= pitch < highest) or (self.include_rest and pitch == rest_id):
-                if last_pitch != pitch:
-                    note_areas.append([])
-                note_areas[-1].append(step)
+        for step, pitch in zip(steps, pitches):
+            if last_pitch != pitch or last_step+1 != step:
+                note_areas.append([])
+            note_areas[-1].append(step)
             last_pitch = pitch
+            last_step = step
 
         bundle.meta['note_areas'] = note_areas
 
@@ -519,12 +518,12 @@ def preprocess_theorytab_original(row):
         Transpose(),
         MonophonizeMelody(),
         TrimMelodyInRange(octave_size=2),
-        AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
+        AddSpecialPitchesToMelody(rest=None, mask=24, pad=25),
         TranslateChordIntoPitchClasses(),
         PermeateChord(),
         AddSpecialPitchesToChord(pad=12),
         Padding(),
-        AddNoteAreasToMeta(include_rest=False),
+        AddNoteAreasToMeta(),
     ])
     return preprocess_theorytab(row, sequential_processor)
 

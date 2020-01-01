@@ -547,6 +547,8 @@ def load_bundle_list(input_csv, input_dir, core_num=1):
     else:
         result_bundles_list = list(map(process_func, df.iterrows()))
     
+    pool.close()
+    
     print("unpacking result bundles list...")
     bundle_list = []
     error_list = []

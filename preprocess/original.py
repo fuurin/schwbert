@@ -469,7 +469,7 @@ class AddNoteAreasToMeta(BundlesProcessor):
         last_pitch, last_step = None, None
         lowest, highest = bundle.meta['melody_pitch_range']
         rest_id = bundle.meta['melody_pitch_rest']
-        
+
         if bundle.meta.get('melody_is_ids', False) == True:
             melody = bundle.melody
         else:
@@ -478,18 +478,20 @@ class AddNoteAreasToMeta(BundlesProcessor):
         for step, pitch in zip(steps, pitches):
             if last_pitch != pitch or last_step+1 != step:
                 note_areas.append([])
-            note_areas[-1].append(step)
+            if not (rest_id is not None and pitch == rest_id):
+                note_areas[-1].append(step)
             last_pitch = pitch
             last_step = step
-
+        
+        if rest_id is not None:
+            note_areas = [area for area in note_areas if area != []]
         bundle.meta['note_areas'] = note_areas
 
         return bundle
 
-
 INPUT_DIR = None
 stop_by_exception = True
-def preprocess_theorytab(row, sequential_processor):
+def preprocess_theorytab(row, sequential_processor, bar_num=16):
     if type(row) == tuple:
         row = row[1]
     elif type(row) == pd.core.frame.DataFrame:
@@ -498,7 +500,7 @@ def preprocess_theorytab(row, sequential_processor):
         
     try:
         ppr = Multitrack(os.path.join(INPUT_DIR, path))
-        bundles = PypianorollBundler().bundle(ppr, row)
+        bundles = PypianorollBundler(bundle_bar_num=bar_num).bundle(ppr, row)
         bundles = sequential_processor(bundles)
     except Exception as e:
         if stop_by_exception: raise e
@@ -518,7 +520,7 @@ def preprocess_theorytab_original(row):
         Transpose(),
         MonophonizeMelody(),
         TrimMelodyInRange(octave_size=2),
-        AddSpecialPitchesToMelody(rest=None, mask=24, pad=25),
+        AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
         TranslateChordIntoPitchClasses(),
         PermeateChord(),
         AddSpecialPitchesToChord(pad=12),
@@ -527,8 +529,27 @@ def preprocess_theorytab_original(row):
     ])
     return preprocess_theorytab(row, sequential_processor)
 
+def preprocess_theorytab_short(row):
+    bar_num = 4
+    sequential_processor = SequentialBundlesProcessor(processors=[
+        RemoveEmptyBundles(),
+        RemoveShortBundles(),
+        Binarize(),
+        DownBeatResolution(resolution_to=4, fill_mode=True),
+        Transpose(),
+        MonophonizeMelody(),
+        TrimMelodyInRange(octave_size=2),
+        AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
+        TranslateChordIntoPitchClasses(),
+        PermeateChord(),
+        AddSpecialPitchesToChord(pad=12),
+        Padding(bar_num=bar_num),
+        AddNoteAreasToMeta(),
+    ])
+    return preprocess_theorytab(row, sequential_processor, bar_num=bar_num)
 
-def load_bundle_list(input_csv, input_dir, core_num=1):
+
+def load_bundle_list(input_csv, input_dir, core_num=1, short=False):
     while os.getcwd().split('/')[-1] != 'schwbert': os.chdir('..')
 
     global INPUT_DIR
@@ -538,7 +559,10 @@ def load_bundle_list(input_csv, input_dir, core_num=1):
     df = df[(df["nokey"] == False) & (df["time_signature"] == "4/4")]
     df = df[df["has_melody_track"] & df["has_chord_track"]]
     df = df.reset_index()
-    process_func = preprocess_theorytab_original
+    if short:
+        process_func = preprocess_theorytab_short
+    else:
+        process_func = preprocess_theorytab_original
     
     print("start preprocessing...")
     pool = Pool(core_num)

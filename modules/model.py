@@ -65,6 +65,7 @@ class ConditionalEmbeddings(nn.Module):
         
         # 連結 & サイズ合わせ
         embeddings = torch.cat((input_emb, condition_emb, step_emb, beat_emb, bar_emb),-1)
+        # embeddings = torch.cat((input_emb, condition_emb, step_emb),-1)
         embeddings = self.concat_dense(embeddings)
         
         return embeddings
@@ -80,7 +81,6 @@ class ConditionalEmbeddings(nn.Module):
             embeddings = embeddings * is_not_pad
             
         return embeddings
-
 
 
 class BertSelfAttention(nn.Module):

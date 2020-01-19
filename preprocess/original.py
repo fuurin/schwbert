@@ -518,7 +518,7 @@ def preprocess_theorytab_original(row):
         Transpose(),
         MonophonizeMelody(),
         TrimMelodyInRange(octave_size=2),
-        AddSpecialPitchesToMelody(rest=None, mask=24, pad=25),
+        AddSpecialPitchesToMelody(rest=24, mask=25, pad=26),
         TranslateChordIntoPitchClasses(),
         PermeateChord(),
         AddSpecialPitchesToChord(pad=12),
